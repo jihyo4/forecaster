@@ -9,10 +9,13 @@ import random
 import re
 import requests
 import sys
-from bs4 import BeautifulSoup
+from typing import List, Tuple, Dict, Optional, Any, Union, KeysView
+
+from bs4 import BeautifulSoup, element
 from datetime import datetime, timedelta
-from htmldate import find_date
-from transformers import PegasusTokenizer, PegasusForConditionalGeneration, pipeline
+from htmldate import find_date # type: ignore
+from transformers import PegasusTokenizer, PegasusForConditionalGeneration, pipeline, Pipeline
+
 
 COOKIES = {"DV": "45wk_UnjodMVQIaWaSHSPtCD9CY5Whk",
                "SOCS": "CAESNQgCEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjUwMzEyLjA4X3AwGgJlbiACGgYIgMzdvgY",
@@ -22,6 +25,7 @@ EXCLUDE_LIST = ['maps', 'policies', 'preferences', 'accounts', 'support', 'www.g
 FILES = ['urls.json', 'summaries.json', 'sentiments.json']
 TEMP_FILES = ['temp_urls.json', 'temp_summaries.json', 'temp_sentiments.json']
 MODEL_NAME = "Nerdward/financial-summarization-pegasus-finetuned-pytorch-model"
+SEARCH_QUERY = f'ethereum%20eth'
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
@@ -34,96 +38,125 @@ USER_AGENTS = [
 
 logger = logging.getLogger(__name__)
 
-def generate_date_ranges(start_date: str, end_date: str) -> list:
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")   
-    date_ranges = []
-    current = start
+def generate_date_ranges(start_date: str, end_date: str) ->  List[Tuple[str, str]]:
+    """
+    Generates a list of consecutive date ranges (2-day or 3-day spans) between two dates.
+    """
+    start: datetime = datetime.strptime(start_date, "%Y-%m-%d")
+    end: datetime = datetime.strptime(end_date, "%Y-%m-%d")   
+    date_ranges: List[Tuple[str, str]] = []
+    current: datetime = start
     while current <= end:
-        next_date = current + timedelta(days=1)
+        next_date: datetime = current + timedelta(days=1)
         if (end - current).days == 2:
             next_date = end
         date_ranges.append((current.strftime("%Y-%m-%d"), next_date.strftime("%Y-%m-%d")))
         current = next_date + timedelta(days=1)
     return date_ranges
 
-def save_files(file, dictionary, save):
+def save_files(file: int, dictionary: Dict[str, List[Any]], save: bool) -> None:
+    """
+    Writes a dictionary to a temporary file and optionally merges and saves it to a main file.
+    """
     with open(TEMP_FILES[file], "w") as json_file:
         json.dump(dictionary, json_file, indent=4)
     if save:
         if os.path.exists(FILES[file]) and os.stat(FILES[file]).st_size != 0:
             with open(FILES[file], "r") as json_file:
-                existing_data = json.load(json_file)               
+                existing_data: Dict[str, List[str]] = json.load(json_file)               
             if isinstance(existing_data, dict):
                 existing_data.update(dictionary)
             else:
                 raise ValueError("JSON file does not contain a dictionary.")
         else:
-            existing_data = dictionary
+            existing_data: Dict[str, List[str]] = dictionary
 
         with open(FILES[file], "w") as json_file:
             json.dump(existing_data, json_file, indent=4)
 
-def search_for_stock_news_links(dates):
-    search_url = f'https://www.google.com/search?q=ethereum%20eth+before:{dates[1]}+after:{dates[0]}&hl=en&tbm=nws'
-    session = requests.Session()
+def search_for_stock_news_links(dates: Tuple[str, str]) -> List[str]:
+    """
+    Searches Google News for topic-related news articles within the specified date range.
+    """
+    search_url: str = f'https://www.google.com/search?q={SEARCH_QUERY}+before:{dates[1]}+after:{dates[0]}&hl=en&tbm=nws'
+    session: requests.Session = requests.Session()
     requests.utils.add_dict_to_cookiejar(session.cookies, COOKIES)
-    headers = {'User-Agent': random.choice(USER_AGENTS)}
-    r = session.get(search_url, headers=headers)
-    soup = BeautifulSoup(r.text, features="html.parser")
+    headers: Dict[str, str] = {'User-Agent': random.choice(USER_AGENTS)}
+    r: requests.Response = session.get(search_url, headers=headers)
+    soup: BeautifulSoup = BeautifulSoup(r.text, features="html.parser")
     with open('res.html', "w") as file:
         file.write(str(soup))
-    links = soup.find_all("a", {"href" : re.compile(r".*")})
-    hrefs = [link['href'] for link in links]
+    links: element.ResultSet = soup.find_all("a", {"href" : re.compile(r".*")})
+    hrefs: List[str] = [link['href'] for link in links]
     return hrefs
 
-def strip_unwanted_urls(urls):
-    val = []
+def strip_unwanted_urls(urls: List[str]) -> List[str]:
+    """
+    Cleans a list of URLs by removing those that contain substrings from an exclusion list.
+    """
+    val: List[str] = []
     for url in urls:
         if 'https://' in url and not any(exc in url for exc in EXCLUDE_LIST):
-            res = re.findall(r'(https?://\S+)', url)[0].split('&')[0]
+            res: str = re.findall(r'(https?://\S+)', url)[0].split('&')[0]
             val.append(res)
     return list(set(val))
 
-def get_links(dates, save):
+def get_links(dates: List[Tuple[str, str]], save: bool) -> None:
+    """
+    Collects, cleans, and saves news article URLs for a list of date ranges.
+    """
     logger.info('Searching for the news.')
-    raw_urls = {date[0]:search_for_stock_news_links(date) for date in dates}
+    raw_urls: Dict[str, List[str]] = {date[0]:search_for_stock_news_links(date) for date in dates}
     logger.info('Cleaning the URLs.')
-    cleaned_urls = {date[0]:strip_unwanted_urls(raw_urls[date[0]]) for date in dates}
+    cleaned_urls: Dict[str, List[str]] = {date[0]:strip_unwanted_urls(raw_urls[date[0]]) for date in dates}
     logger.info('Saving the URLs.')
     save_files(0, cleaned_urls, save)
     logger.info('Successfully saved the URLs.')
 
-def scrape_and_process(session, URLs, date):
-    dictionary = {}
-    min_date = datetime.strptime(date, "%Y-%m-%d")
-    max_date = min_date + timedelta(days=1)
-    default_date = min_date.strftime("%Y-%m-%d")
+def scrape_and_process(
+    session: requests.Session,
+    URLs: List[str],
+    date: str
+) -> Dict[str, List[Tuple[str, str]]]:
+    """
+    Scrapes article content from a list of URLs.
+    """
+    dictionary: Dict[str, List[Tuple[str, str]]] = {}
+    min_date: datetime = datetime.strptime(date, "%Y-%m-%d")
+    max_date: datetime = min_date + timedelta(days=1)
+    default_date: str = min_date.strftime("%Y-%m-%d")
     for url in URLs:
         logger.info(url)
-        r = session.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(r.text, 'html.parser')
-        url_date = find_date(str(soup))
+        r: requests.Response = session.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        soup: BeautifulSoup = BeautifulSoup(r.text, 'html.parser')
+        url_date: Optional[str] = find_date(str(soup))
         if url_date is None or not (min_date <= datetime.strptime(url_date, "%Y-%m-%d") <= max_date):
             url_date = default_date
-        results = soup.find_all('p')
-        text = [res.text for res in results[1:]]
-        words = ' '.join(text).split(' ')[:350]
-        article = ' '.join(words)
+        results: element.ResultSet = soup.find_all('p')
+        text: List[str] = [res.text for res in results[1:]]
+        words: List[str] = ' '.join(text).split(' ')[:350]
+        article: str = ' '.join(words)
         if url_date in dictionary:
             dictionary[url_date].append((article, url))
         else:
             dictionary[url_date] = [(article, url)]
     return dictionary
 
-def summarise(articles, tokeniser, model):
-    summaries = []
+def summarise(
+    articles: List[Tuple[str, str]],
+    tokeniser: PegasusTokenizer,
+    model: PegasusForConditionalGeneration
+) -> List[Tuple[str, str]]:
+    """
+    Generates short summaries for a list of article texts using a Pegasus model.
+    """
+    summaries: List[Tuple[str, str]] = []
     for article, url in articles:
         try:
             logger.info(url)
             input_ids = tokeniser.encode(article, return_tensors="pt")
-            output = model.generate(input_ids, max_length=55, num_beams=5, early_stopping=True)
-            summary = tokeniser.decode(output[0], skip_special_tokens=True)
+            output = model.generate(input_ids, max_length=55, num_beams=5, early_stopping=True) # type: ignore
+            summary: str = tokeniser.decode(output[0], skip_special_tokens=True)
             if summary == "All photographs subject to copyright.":
                 continue
             summaries.append((summary, url))
@@ -131,31 +164,45 @@ def summarise(articles, tokeniser, model):
             continue
     return summaries
 
-def get_summaries(session, files, save):
+def get_summaries(session: requests.Session, files: List[str], save: bool) -> None:
+    """
+    Loads URLs from file, scrapes article content, summarizes it using Pegasus,
+    and saves the results.
+    """
     logger.info('Setting up.')
-    tokeniser = PegasusTokenizer.from_pretrained(MODEL_NAME)
-    model = PegasusForConditionalGeneration.from_pretrained(MODEL_NAME)
+    tokeniser: PegasusTokenizer = PegasusTokenizer.from_pretrained(MODEL_NAME)
+    model: PegasusForConditionalGeneration = PegasusForConditionalGeneration.from_pretrained(MODEL_NAME)
     with open(files[0], "r") as json_file:
-        urls = json.load(json_file)               
+        urls: Optional[Dict[str, List[str]]] = json.load(json_file)               
         if isinstance(urls, dict):
-            dates = urls.keys()
+            dates: KeysView = urls.keys()
         else:
             raise ValueError("JSON file does not contain a dictionary.")
     logger.info('Scraping the articles.')
-    articles = {}
+    articles: Dict[str, List[Tuple[str, str]]] = {}
     for date in dates:
         articles.update(scrape_and_process(session, urls[date], date))
     logger.info('Summarising the articles.')
-    summaries = {date:summarise(articles[date], tokeniser, model) for date in articles.keys()}
+    summaries: Dict[str, List[Tuple[str, str]]] = {date:summarise(articles[date], tokeniser, model) for date in articles.keys()}
     logger.info('Saving the summaries.')
     save_files(1, summaries, save)
     logger.info('Successfully saved the summaries.')
 
-def create_output_array(dates, summaries, scores):
-    output = []
+def create_output_array(
+    dates: Union[List[str], Any],
+    summaries: Dict[str, List[Tuple[str, str]]],
+    scores: Dict[str, List[Dict[str, Union[str, float]]]]
+) -> List[List[Union[str, float]]]:
+    """
+    Combines dates, article summaries, sentiment labels, and scores into a tabular output array.
+    Returns:
+        A list of lists, where each sublist contains:
+        [date, summary_text, sentiment_label, sentiment_score, article_url].
+    """
+    output: List[List[Union[str, float]]] = []
     for date in dates:
         for counter in range(len(summaries[date])):
-            output_this = [
+            output_this: List[Union[str, float]] = [
                             date, 
                             summaries[date][counter][0], 
                             scores[date][counter]['label'], 
@@ -165,16 +212,19 @@ def create_output_array(dates, summaries, scores):
             output.append(output_this)
     return output
 
-def get_sentiments(files):
-    sentiment_analiser = pipeline(model='Robertuus/Crypto_Sentiment_Analysis_Bert')
+def get_sentiments(files: List[str]) -> None:
+    """
+    Loads article summaries, performs sentiment analysis, and saves the final results to a CSV file.
+    """
+    sentiment_analiser: Pipeline = pipeline(model='Robertuus/Crypto_Sentiment_Analysis_Bert')
     with open(files[1], "r") as json_file:
         summaries = json.load(json_file)               
         if isinstance(summaries, dict):
             dates = summaries.keys()
         else:
             raise ValueError("JSON file does not contain a dictionary.")
-    scores = {date:sentiment_analiser([i[0] for i in summaries[date]]) for date in dates}              
-    final_output = create_output_array(dates, summaries, scores)
+    scores: Dict[str, List[Dict[str, Union[str, float]]]] = {date:sentiment_analiser([i[0] for i in summaries[date]]) for date in dates} # type: ignore              
+    final_output: List[List[Union[str, float]]] = create_output_array(dates, summaries, scores)
     #final_output.insert(0, ['date','Summary', 'Sentiment', 'Sentiment Score', 'URL'])
 
     with open('ethsummaries.csv', mode='a', newline='') as f:
@@ -198,7 +248,7 @@ def main() -> int:
         files = FILES
     else:
         files = TEMP_FILES
-    session = requests.Session()
+    session: requests.Session = requests.Session()
     requests.utils.add_dict_to_cookiejar(session.cookies, COOKIES)
     if args.pipeline:
         try:
@@ -206,6 +256,7 @@ def main() -> int:
             get_links(dates, args.save)
         except TypeError:
             logger.error('Provide the dates.')
+            return 1
         get_summaries(session, files, args.save)
         get_sentiments(files)
     elif args.urls:
@@ -220,6 +271,7 @@ def main() -> int:
         get_sentiments(files)
     else:
         logger.info('Provide one of the options.')
+    return 0
 
 if __name__ == '__main__':
     sys.exit(main())
